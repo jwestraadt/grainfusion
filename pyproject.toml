@@ -1,0 +1,20 @@
+[project]
+name = "datafusion-image-register"
+version = "0.1.0"
+description = "Point-based image registration GUI for affine and homography correction."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "opencv-python>=4.9",
+    "pillow>=10.0",
+    "tifffile>=2024.2.12",
+]
+
+[project.scripts]
+image-register = "datafusion_image_register.gui:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
