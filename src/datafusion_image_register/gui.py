@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import threading
 import tkinter as tk
+from math import ceil
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
 from PIL import Image, ImageTk
 
-from .io import SUPPORTED_EXTENSIONS, display_preview_rgb, read_image, write_image
+from .io import SUPPORTED_EXTENSIONS, as_display_rgb, read_image, write_image
 from .overlay import make_overlay
 from .settings import load_settings, save_settings
 from .transforms import RegistrationError, build_registration_settings
@@ -22,18 +24,61 @@ IMAGE_FILETYPES = [
 ]
 
 
+def magnifier_crop_rgb(
+    image: np.ndarray,
+    center_xy: tuple[float, float],
+    radius: int,
+) -> np.ndarray:
+    source = np.asarray(image)
+    height, width = source.shape[:2]
+    radius = max(1, int(radius))
+    crop_size = radius * 2 + 1
+    center_x = int(np.clip(round(center_xy[0]), 0, width - 1))
+    center_y = int(np.clip(round(center_xy[1]), 0, height - 1))
+
+    x0 = max(0, center_x - radius)
+    x1 = min(width, center_x + radius + 1)
+    y0 = max(0, center_y - radius)
+    y1 = min(height, center_y + radius + 1)
+    paste_x0 = x0 - (center_x - radius)
+    paste_y0 = y0 - (center_y - radius)
+
+    if source.ndim == 2:
+        padded = np.zeros((crop_size, crop_size), dtype=source.dtype)
+        padded[paste_y0 : paste_y0 + (y1 - y0), paste_x0 : paste_x0 + (x1 - x0)] = source[y0:y1, x0:x1]
+    else:
+        padded = np.zeros((crop_size, crop_size, source.shape[2]), dtype=source.dtype)
+        padded[paste_y0 : paste_y0 + (y1 - y0), paste_x0 : paste_x0 + (x1 - x0), :] = source[y0:y1, x0:x1, :]
+
+    return as_display_rgb(padded)
+
+
 class ImagePanel(ttk.Frame):
-    def __init__(self, parent: tk.Widget, title: str, click_callback=None) -> None:
+    def __init__(
+        self,
+        parent: tk.Widget,
+        title: str,
+        click_callback=None,
+        magnifier_enabled=None,
+    ) -> None:
         super().__init__(parent)
         self.title = title
         self.click_callback = click_callback
+        self.magnifier_enabled = magnifier_enabled or (lambda: False)
         self.image: np.ndarray | None = None
         self.display_rgb: np.ndarray | None = None
-        self.preview_step = 1
         self.photo: ImageTk.PhotoImage | None = None
-        self.photo_key: tuple[int, int, int] | None = None
+        self.photo_key: tuple | None = None
+        self.magnifier_photo: ImageTk.PhotoImage | None = None
+        self.magnifier_point: tuple[float, float] | None = None
+        self.magnifier_canvas_xy: tuple[int, int] | None = None
+        self.magnifier_source_radius = 32
         self.points: list[tuple[float, float]] = []
         self.pending_point: tuple[float, float] | None = None
+        self.zoom_factor = 1.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self._pan_last_xy: tuple[int, int] | None = None
         self.scale = 1.0
         self.offset_x = 0
         self.offset_y = 0
@@ -44,16 +89,29 @@ class ImagePanel(ttk.Frame):
         self.canvas = tk.Canvas(self, width=430, height=340, bg="#1f1f1f", highlightthickness=1)
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Button-1>", self._on_click)
+        self.canvas.bind("<Motion>", self._on_motion)
+        self.canvas.bind("<Leave>", self._hide_magnifier)
+        self.canvas.bind("<ButtonPress-2>", self._on_middle_press)
+        self.canvas.bind("<B2-Motion>", self._on_middle_drag)
+        self.canvas.bind("<ButtonRelease-2>", self._on_middle_release)
+        self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
+        self.canvas.bind("<Button-4>", self._on_mouse_wheel)
+        self.canvas.bind("<Button-5>", self._on_mouse_wheel)
         self.canvas.bind("<Configure>", lambda _event: self.redraw())
 
     def set_image(self, image: np.ndarray | None) -> None:
         self.image = image
         self.display_rgb = None
-        self.preview_step = 1
         self.photo = None
         self.photo_key = None
+        self.magnifier_photo = None
+        self.magnifier_point = None
+        self.magnifier_canvas_xy = None
+        self.zoom_factor = 1.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
         if image is not None:
-            self.display_rgb, self.preview_step = display_preview_rgb(image)
+            self.display_rgb = as_display_rgb(image)
         self.redraw()
 
     def set_points(
@@ -81,20 +139,42 @@ class ImagePanel(ttk.Frame):
         canvas_width = max(1, self.canvas.winfo_width())
         canvas_height = max(1, self.canvas.winfo_height())
         image_height, image_width = self.display_rgb.shape[:2]
-        self.scale = min(canvas_width / image_width, canvas_height / image_height)
+        fit_scale = min(canvas_width / image_width, canvas_height / image_height)
+        self.scale = fit_scale * self.zoom_factor
         self.display_width = max(1, int(round(image_width * self.scale)))
         self.display_height = max(1, int(round(image_height * self.scale)))
-        self.offset_x = (canvas_width - self.display_width) // 2
-        self.offset_y = (canvas_height - self.display_height) // 2
+        self.offset_x, self.pan_x = self._offset_and_clamped_pan(
+            canvas_size=canvas_width,
+            display_size=self.display_width,
+            pan=self.pan_x,
+        )
+        self.offset_y, self.pan_y = self._offset_and_clamped_pan(
+            canvas_size=canvas_height,
+            display_size=self.display_height,
+            pan=self.pan_y,
+        )
 
-        photo_key = (id(self.display_rgb), self.display_width, self.display_height)
+        # Crop only the visible portion of display_rgb to the canvas.
+        img_x0 = max(0, int(-self.offset_x / self.scale))
+        img_y0 = max(0, int(-self.offset_y / self.scale))
+        img_x1 = min(image_width,  ceil((canvas_width  - self.offset_x) / self.scale))
+        img_y1 = min(image_height, ceil((canvas_height - self.offset_y) / self.scale))
+        crop = self.display_rgb[img_y0:img_y1, img_x0:img_x1]
+        render_w = max(1, int(round((img_x1 - img_x0) * self.scale)))
+        render_h = max(1, int(round((img_y1 - img_y0) * self.scale)))
+        resample = Image.Resampling.NEAREST if self.scale >= 1.0 else Image.Resampling.BILINEAR
+
+        photo_key = (id(self.display_rgb), img_x0, img_y0, img_x1, img_y1, render_w, render_h)
         if self.photo is None or self.photo_key != photo_key:
-            pil_image = Image.fromarray(self.display_rgb, mode="RGB")
-            pil_image = pil_image.resize((self.display_width, self.display_height), Image.Resampling.BILINEAR)
+            pil_image = Image.fromarray(crop, mode="RGB")
+            pil_image = pil_image.resize((render_w, render_h), resample)
             self.photo = ImageTk.PhotoImage(pil_image)
             self.photo_key = photo_key
-        self.canvas.create_image(self.offset_x, self.offset_y, image=self.photo, anchor="nw")
+        canvas_img_x = max(0, int(round(self.offset_x + img_x0 * self.scale)))
+        canvas_img_y = max(0, int(round(self.offset_y + img_y0 * self.scale)))
+        self.canvas.create_image(canvas_img_x, canvas_img_y, image=self.photo, anchor="nw")
         self._draw_points()
+        self._draw_magnifier()
 
     def _draw_points(self) -> None:
         for index, point in enumerate(self.points, start=1):
@@ -103,8 +183,8 @@ class ImagePanel(ttk.Frame):
             self._draw_marker(self.pending_point, len(self.points) + 1, fill="#ffd166")
 
     def _draw_marker(self, point: tuple[float, float], index: int, fill: str) -> None:
-        x = self.offset_x + (point[0] / self.preview_step) * self.scale
-        y = self.offset_y + (point[1] / self.preview_step) * self.scale
+        x = self.offset_x + point[0] * self.scale
+        y = self.offset_y + point[1] * self.scale
         radius = 5
         self.canvas.create_oval(x - radius, y - radius, x + radius, y + radius, outline="black", width=2)
         self.canvas.create_oval(x - radius, y - radius, x + radius, y + radius, outline=fill, width=2)
@@ -117,6 +197,66 @@ class ImagePanel(ttk.Frame):
         if point is not None:
             self.click_callback(point)
 
+    def _on_motion(self, event: tk.Event) -> None:
+        if self.display_rgb is None or self.click_callback is None or not self.magnifier_enabled():
+            self._hide_magnifier()
+            return
+        point = self.canvas_to_image(event.x, event.y)
+        if point is None:
+            self._hide_magnifier()
+            return
+        self.magnifier_point = point
+        self.magnifier_canvas_xy = (int(event.x), int(event.y))
+        self.redraw()
+
+    def _on_middle_press(self, event: tk.Event) -> None:
+        self._hide_magnifier()
+        self._pan_last_xy = (int(event.x_root), int(event.y_root))
+
+    def _on_middle_drag(self, event: tk.Event) -> None:
+        current_xy = (int(event.x_root), int(event.y_root))
+        if self._pan_last_xy is None:
+            self._pan_last_xy = current_xy
+            return
+        dx = current_xy[0] - self._pan_last_xy[0]
+        dy = current_xy[1] - self._pan_last_xy[1]
+        self.pan_x += dx
+        self.pan_y += dy
+        self._pan_last_xy = current_xy
+        self.redraw()
+
+    def _on_middle_release(self, event: tk.Event) -> None:
+        self._pan_last_xy = None
+
+    def _on_mouse_wheel(self, event: tk.Event) -> None:
+        direction = self._wheel_direction(event)
+        if direction == 0:
+            return
+        new_zoom = float(np.clip(self.zoom_factor * (1.2 if direction > 0 else 1.0 / 1.2), 1.0, 12.0))
+        if np.isclose(new_zoom, self.zoom_factor):
+            return
+        self.pan_x, self.pan_y = self.pan_for_zoom_at(new_zoom, int(event.x), int(event.y))
+        self.zoom_factor = new_zoom
+        self.redraw()
+
+    def _wheel_direction(self, event: tk.Event) -> int:
+        if hasattr(event, "delta") and event.delta:
+            return 1 if event.delta > 0 else -1
+        button = getattr(event, "num", None)
+        if button == 4:
+            return 1
+        if button == 5:
+            return -1
+        return 0
+
+    def _hide_magnifier(self, _event: tk.Event | None = None) -> None:
+        if self.magnifier_point is None and self.magnifier_canvas_xy is None:
+            return
+        self.magnifier_point = None
+        self.magnifier_canvas_xy = None
+        self.magnifier_photo = None
+        self.redraw()
+
     def canvas_to_image(self, x: int, y: int) -> tuple[float, float] | None:
         if self.image is None:
             return None
@@ -125,12 +265,87 @@ class ImagePanel(ttk.Frame):
         if not (self.offset_y <= y <= self.offset_y + self.display_height):
             return None
 
-        image_x = ((x - self.offset_x) / self.scale) * self.preview_step
-        image_y = ((y - self.offset_y) / self.scale) * self.preview_step
+        image_x = (x - self.offset_x) / self.scale
+        image_y = (y - self.offset_y) / self.scale
         height, width = self.image.shape[:2]
         if not (0 <= image_x < width and 0 <= image_y < height):
             return None
         return float(image_x), float(image_y)
+
+    def _draw_magnifier(self) -> None:
+        if self.image is None or self.magnifier_point is None or self.magnifier_canvas_xy is None:
+            return
+
+        panel_size = self._magnifier_panel_size()
+        crop_rgb = magnifier_crop_rgb(self.image, self.magnifier_point, self.magnifier_source_radius)
+        pil_image = Image.fromarray(crop_rgb, mode="RGB")
+        pil_image = pil_image.resize((panel_size, panel_size), Image.Resampling.NEAREST)
+        self.magnifier_photo = ImageTk.PhotoImage(pil_image)
+
+        x0, y0 = self._magnifier_position(panel_size)
+        x1 = x0 + panel_size
+        y1 = y0 + panel_size
+        center_x = x0 + panel_size // 2
+        center_y = y0 + panel_size // 2
+
+        self.canvas.create_rectangle(x0 - 3, y0 - 3, x1 + 3, y1 + 3, fill="#101010", outline="#ffffff", width=1)
+        self.canvas.create_image(x0, y0, image=self.magnifier_photo, anchor="nw")
+        self.canvas.create_line(center_x, y0, center_x, y1, fill="#ffeb3b", width=1)
+        self.canvas.create_line(x0, center_y, x1, center_y, fill="#ffeb3b", width=1)
+        self.canvas.create_rectangle(x0, y0, x1, y1, outline="#ffffff", width=1)
+
+    def _magnifier_panel_size(self) -> int:
+        canvas_width = max(1, self.canvas.winfo_width())
+        canvas_height = max(1, self.canvas.winfo_height())
+        return int(np.clip(min(canvas_width, canvas_height) * 0.42, 130, 200))
+
+    def _magnifier_position(self, panel_size: int) -> tuple[int, int]:
+        canvas_width = max(1, self.canvas.winfo_width())
+        canvas_height = max(1, self.canvas.winfo_height())
+        cursor_x, cursor_y = self.magnifier_canvas_xy or (0, 0)
+        offset = 18
+        x0 = cursor_x + offset
+        y0 = cursor_y + offset
+        if x0 + panel_size + 4 > canvas_width:
+            x0 = cursor_x - panel_size - offset
+        if y0 + panel_size + 4 > canvas_height:
+            y0 = cursor_y - panel_size - offset
+        x0 = int(np.clip(x0, 4, max(4, canvas_width - panel_size - 4)))
+        y0 = int(np.clip(y0, 4, max(4, canvas_height - panel_size - 4)))
+        return x0, y0
+
+    def pan_for_zoom_at(self, zoom_factor: float, canvas_x: int, canvas_y: int) -> tuple[float, float]:
+        if self.display_rgb is None:
+            return self.pan_x, self.pan_y
+
+        image_height, image_width = self.display_rgb.shape[:2]
+        canvas_width = max(1, self.canvas.winfo_width())
+        canvas_height = max(1, self.canvas.winfo_height())
+        preview_x = (canvas_x - self.offset_x) / max(self.scale, 1e-9)
+        preview_y = (canvas_y - self.offset_y) / max(self.scale, 1e-9)
+        preview_x = float(np.clip(preview_x, 0, image_width))
+        preview_y = float(np.clip(preview_y, 0, image_height))
+
+        fit_scale = min(canvas_width / image_width, canvas_height / image_height)
+        new_scale = fit_scale * float(np.clip(zoom_factor, 1.0, 12.0))
+        new_display_width = max(1, int(round(image_width * new_scale)))
+        new_display_height = max(1, int(round(image_height * new_scale)))
+        center_x = (canvas_width - new_display_width) / 2.0
+        center_y = (canvas_height - new_display_height) / 2.0
+        new_pan_x = canvas_x - preview_x * new_scale - center_x
+        new_pan_y = canvas_y - preview_y * new_scale - center_y
+        return new_pan_x, new_pan_y
+
+    def _offset_and_clamped_pan(self, canvas_size: int, display_size: int, pan: float) -> tuple[int, float]:
+        centered_offset = (canvas_size - display_size) / 2.0
+        if display_size <= canvas_size:
+            return int(round(centered_offset)), 0.0
+
+        offset = centered_offset + pan
+        min_offset = canvas_size - display_size
+        max_offset = 0
+        offset = float(np.clip(offset, min_offset, max_offset))
+        return int(round(offset)), offset - centered_offset
 
 
 class RegistrationApp(tk.Tk):
@@ -163,6 +378,7 @@ class RegistrationApp(tk.Tk):
         self.scale_bar_font_size_var = tk.StringVar(value="")
         self.scale_bar_thickness_var = tk.StringVar(value="")
         self.crop_to_common_var = tk.BooleanVar(value=False)
+        self.magnifier_enabled_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="Load fixed and moving images, then click fixed/moving point pairs.")
 
         self._build_ui()
@@ -171,8 +387,19 @@ class RegistrationApp(tk.Tk):
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
 
-        controls = ttk.Frame(self, padding=10)
-        controls.grid(row=0, column=0, sticky="ns")
+        sidebar = ttk.Frame(self)
+        sidebar.grid(row=0, column=0, sticky="ns")
+        self._ctrl_canvas = tk.Canvas(sidebar, width=175, highlightthickness=0, bd=0)
+        ctrl_scrollbar = ttk.Scrollbar(sidebar, orient="vertical", command=self._ctrl_canvas.yview)
+        self._ctrl_canvas.configure(yscrollcommand=ctrl_scrollbar.set)
+        ctrl_scrollbar.pack(side="right", fill="y")
+        self._ctrl_canvas.pack(side="left", fill="both", expand=True)
+        controls = ttk.Frame(self._ctrl_canvas, padding=10)
+        self._ctrl_window_id = self._ctrl_canvas.create_window((0, 0), window=controls, anchor="nw")
+        controls.bind("<Configure>", self._on_ctrl_frame_configure)
+        self._ctrl_canvas.bind("<Configure>", self._on_ctrl_canvas_configure)
+        self._ctrl_canvas.bind("<MouseWheel>", self._on_ctrl_scroll)
+        controls.bind("<MouseWheel>", self._on_ctrl_scroll)
 
         viewer = ttk.Frame(self, padding=(0, 10, 10, 10))
         viewer.grid(row=0, column=1, sticky="nsew")
@@ -181,10 +408,20 @@ class RegistrationApp(tk.Tk):
         viewer.rowconfigure(0, weight=1)
         viewer.rowconfigure(1, weight=1)
 
-        self.fixed_panel = ImagePanel(viewer, "Fixed / Reference", self._add_fixed_point)
+        self.fixed_panel = ImagePanel(
+            viewer,
+            "Fixed / Reference",
+            self._add_fixed_point,
+            magnifier_enabled=self._magnifier_enabled,
+        )
         self.fixed_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 8))
 
-        self.moving_panel = ImagePanel(viewer, "Moving", self._add_moving_point)
+        self.moving_panel = ImagePanel(
+            viewer,
+            "Moving",
+            self._add_moving_point,
+            magnifier_enabled=self._magnifier_enabled,
+        )
         self.moving_panel.grid(row=0, column=1, sticky="nsew", pady=(0, 8))
 
         self.overlay_panel = ImagePanel(viewer, "Overlay Preview")
@@ -194,6 +431,15 @@ class RegistrationApp(tk.Tk):
 
         status = ttk.Label(self, textvariable=self.status_var, anchor="w", padding=(10, 4))
         status.grid(row=1, column=0, columnspan=2, sticky="ew")
+
+    def _on_ctrl_frame_configure(self, _event: tk.Event) -> None:
+        self._ctrl_canvas.configure(scrollregion=self._ctrl_canvas.bbox("all"))
+
+    def _on_ctrl_canvas_configure(self, event: tk.Event) -> None:
+        self._ctrl_canvas.itemconfigure(self._ctrl_window_id, width=event.width)
+
+    def _on_ctrl_scroll(self, event: tk.Event) -> None:
+        self._ctrl_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def _build_controls(self, parent: ttk.Frame) -> None:
         ttk.Button(parent, text="Load Fixed", command=self._load_fixed).pack(fill="x", pady=(0, 4))
@@ -232,6 +478,12 @@ class RegistrationApp(tk.Tk):
         self._entry(parent, "Scale bar units", self.scale_bar_units_var)
         self._entry(parent, "Scale bar font px", self.scale_bar_font_size_var)
         self._entry(parent, "Scale bar height px", self.scale_bar_thickness_var)
+        ttk.Checkbutton(
+            parent,
+            text="Magnifier",
+            variable=self.magnifier_enabled_var,
+            command=self._toggle_magnifier,
+        ).pack(anchor="w", pady=(8, 0))
         ttk.Checkbutton(
             parent,
             text="Crop to common area",
@@ -275,11 +527,19 @@ class RegistrationApp(tk.Tk):
         path = self._ask_image_path()
         if path is None:
             return
-        self._set_status(f"Loading moving image: {Path(path).name}")
-        self.update_idletasks()
-        self.moving_image = self._read_image_or_alert(path)
-        if self.moving_image is None:
-            return
+        self._set_status(f"Loading moving image: {Path(path).name} …")
+
+        def _load() -> None:
+            try:
+                image = read_image(path)
+                self.after(0, lambda: self._on_moving_loaded(image, path))
+            except Exception as exc:
+                self.after(0, lambda: self._on_moving_load_error(exc))
+
+        threading.Thread(target=_load, daemon=True).start()
+
+    def _on_moving_loaded(self, image: np.ndarray, path: Path) -> None:
+        self.moving_image = image
         self.moving_path = str(path)
         self._reset_points(redraw=False)
         self.fixed_panel.set_points(self.fixed_points, self.pending_fixed_point)
@@ -289,6 +549,10 @@ class RegistrationApp(tk.Tk):
         self.preview_overlay = None
         self.overlay_panel.set_image(None)
         self._set_status(f"Loaded moving image: {Path(path).name}")
+
+    def _on_moving_load_error(self, exc: Exception) -> None:
+        messagebox.showerror("Image Load Error", str(exc))
+        self._set_status("Failed to load moving image.")
 
     def _load_modality(self) -> None:
         path = self._ask_image_path()
@@ -312,6 +576,15 @@ class RegistrationApp(tk.Tk):
     def _ask_image_path(self) -> Path | None:
         path = filedialog.askopenfilename(filetypes=IMAGE_FILETYPES)
         return Path(path) if path else None
+
+    def _magnifier_enabled(self) -> bool:
+        return bool(self.magnifier_enabled_var.get())
+
+    def _toggle_magnifier(self) -> None:
+        if self._magnifier_enabled():
+            return
+        self.fixed_panel._hide_magnifier()
+        self.moving_panel._hide_magnifier()
 
     def _add_fixed_point(self, point: tuple[float, float]) -> None:
         if self.fixed_image is None or self.moving_image is None:

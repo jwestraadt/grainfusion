@@ -27,6 +27,7 @@ uv run image-register
    - moving point 1
    - fixed point 2
    - moving point 2
+   - enable `Magnifier` and move over either point-picking image for a full-resolution enlarged view
 6. Click `Preview / Estimate`.
 7. Adjust the alpha slider.
 8. Leave scale-bar font/height blank for automatic sizing, or enter pixel values to override them.
@@ -48,5 +49,6 @@ Morphops TPS needs at least 3 non-collinear point pairs and usually benefits fro
 - Scale-bar labels are rounded to whole-number values.
 - The common-area crop uses the rectangular bounding box where the fixed output and warped moving/modality image overlap.
 - Large images are shown with downsampled interactive previews, while registration and export still use the full-resolution image data.
+- Mouse wheel zooms the fixed and moving image views together. Middle-button drag pans both views together.
 - `morphops_tps` uses Morphops thin-plate spline warping. It is non-linear and uses all selected point pairs directly.
 - The saved JSON separates geometric registration settings from display settings such as alpha, scale bar length, scale-bar styling, and crop mode.
