@@ -372,6 +372,7 @@ class RegistrationApp(tk.Tk):
         self.current_settings: dict | None = None
         self.preview_overlay: np.ndarray | None = None
         self.preview_registered: np.ndarray | None = None
+        self.preview_fixed: np.ndarray | None = None
         self.xmap = None
         self.ang_viz_var = tk.StringVar(value="IPF-Z")
         self.ang_miso_var = tk.StringVar(value="5.0")
@@ -523,7 +524,8 @@ class RegistrationApp(tk.Tk):
         ttk.Button(parent, text="Load Settings", command=self._load_settings).pack(fill="x", pady=(0, 12))
 
         ttk.Button(parent, text="Export Overlay", command=self._export_overlay).pack(fill="x", pady=(0, 4))
-        ttk.Button(parent, text="Export Registered", command=self._export_registered).pack(fill="x")
+        ttk.Button(parent, text="Export Registered", command=self._export_registered).pack(fill="x", pady=(0, 4))
+        ttk.Button(parent, text="Export Fixed", command=self._export_fixed).pack(fill="x")
 
     def _entry(self, parent: ttk.Frame, label: str, variable: tk.StringVar) -> None:
         ttk.Label(parent, text=label).pack(anchor="w", pady=(6, 0))
@@ -733,7 +735,7 @@ class RegistrationApp(tk.Tk):
             self.scale_bar_thickness_var.get(),
             "Scale bar height px",
         )
-        overlay, registered, _fixed_output = make_overlay(
+        overlay, registered, fixed_output = make_overlay(
             fixed_image=self.fixed_image,
             moving_or_modality_image=source_image,
             settings=self.current_settings,
@@ -746,6 +748,7 @@ class RegistrationApp(tk.Tk):
         )
         self.preview_overlay = overlay
         self.preview_registered = registered
+        self.preview_fixed = fixed_output
         self.overlay_panel.set_image(overlay)
         registration = self.current_settings["registration"]
         self._set_status(
@@ -853,6 +856,22 @@ class RegistrationApp(tk.Tk):
             self._set_status(f"Exported registered image: {Path(path).name}")
         except Exception as exc:
             messagebox.showerror("Export Registered Error", str(exc))
+
+    def _export_fixed(self) -> None:
+        if self.preview_fixed is None:
+            self._set_status("Create a preview before exporting the fixed image.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".tif",
+            filetypes=[("TIFF", "*.tif *.tiff"), ("PNG", "*.png"), ("JPEG", "*.jpg *.jpeg")],
+        )
+        if not path:
+            return
+        try:
+            write_image(path, self.preview_fixed)
+            self._set_status(f"Exported fixed image: {Path(path).name}")
+        except Exception as exc:
+            messagebox.showerror("Export Fixed Error", str(exc))
 
     def _positive_float(self, value: str, label: str) -> float:
         parsed = float(value)
