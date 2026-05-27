@@ -14,11 +14,20 @@ def make_overlay(
     alpha: float,
     scale_bar_length: float | None = None,
     scale_bar_units: str = "um",
+    crop_to_common: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     alpha = float(np.clip(alpha, 0.0, 1.0))
 
-    fixed_output, _ = resample_fixed_to_output(fixed_image, settings)
+    fixed_output, fixed_mask = resample_fixed_to_output(fixed_image, settings)
     moving_output, moving_mask = warp_moving_to_output(moving_or_modality_image, settings)
+
+    if crop_to_common:
+        fixed_output, moving_output, moving_mask = crop_to_common_area(
+            fixed_output,
+            moving_output,
+            fixed_mask,
+            moving_mask,
+        )
 
     fixed_rgb = as_display_rgb(fixed_output)
     moving_rgb = as_display_rgb(moving_output)
@@ -37,6 +46,26 @@ def make_overlay(
         )
 
     return overlay, moving_output, fixed_output
+
+
+def crop_to_common_area(
+    fixed_output: np.ndarray,
+    moving_output: np.ndarray,
+    fixed_mask: np.ndarray,
+    moving_mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    common_mask = np.asarray(fixed_mask, dtype=bool) & np.asarray(moving_mask, dtype=bool)
+    y_indices, x_indices = np.nonzero(common_mask)
+    if len(y_indices) == 0 or len(x_indices) == 0:
+        raise ValueError("The fixed and moving images do not overlap on the output grid.")
+
+    y_slice = slice(int(y_indices.min()), int(y_indices.max()) + 1)
+    x_slice = slice(int(x_indices.min()), int(x_indices.max()) + 1)
+    return (
+        fixed_output[y_slice, x_slice],
+        moving_output[y_slice, x_slice],
+        moving_mask[y_slice, x_slice],
+    )
 
 
 def add_scale_bar(
@@ -81,4 +110,3 @@ def add_scale_bar(
     )
     draw.text((text_x, text_y), label, fill=color, font=font)
     return np.asarray(image)
-

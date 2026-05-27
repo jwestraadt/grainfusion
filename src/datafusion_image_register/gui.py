@@ -148,6 +148,7 @@ class RegistrationApp(tk.Tk):
         self.alpha_var = tk.DoubleVar(value=0.5)
         self.scale_bar_length_var = tk.StringVar(value="10")
         self.scale_bar_units_var = tk.StringVar(value="um")
+        self.crop_to_common_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Load fixed and moving images, then click fixed/moving point pairs.")
 
         self._build_ui()
@@ -215,6 +216,12 @@ class RegistrationApp(tk.Tk):
 
         self._entry(parent, "Scale bar length", self.scale_bar_length_var)
         self._entry(parent, "Scale bar units", self.scale_bar_units_var)
+        ttk.Checkbutton(
+            parent,
+            text="Crop to common area",
+            variable=self.crop_to_common_var,
+            command=self._refresh_preview_if_ready,
+        ).pack(anchor="w", pady=(8, 0))
 
         ttk.Separator(parent).pack(fill="x", pady=12)
         ttk.Button(parent, text="Preview / Estimate", command=self._estimate_and_preview).pack(fill="x", pady=(0, 4))
@@ -378,6 +385,7 @@ class RegistrationApp(tk.Tk):
             alpha=alpha,
             scale_bar_length=scale_length,
             scale_bar_units=units,
+            crop_to_common=bool(self.crop_to_common_var.get()),
         )
         self.preview_overlay = overlay
         self.preview_registered = registered
@@ -409,6 +417,7 @@ class RegistrationApp(tk.Tk):
                     self.scale_bar_length_var.get(), "Scale bar length"
                 ),
                 "scale_bar_units": self.scale_bar_units_var.get().strip() or "units",
+                "crop_to_common": bool(self.crop_to_common_var.get()),
             }
             path = filedialog.asksaveasfilename(
                 defaultextension=".json",
@@ -443,6 +452,7 @@ class RegistrationApp(tk.Tk):
                 self.scale_bar_length_var.set(str(display["scale_bar_length"]))
             if display.get("scale_bar_units"):
                 self.scale_bar_units_var.set(str(display["scale_bar_units"]))
+            self.crop_to_common_var.set(bool(display.get("crop_to_common", False)))
             self._update_point_panels()
             self._set_status(f"Loaded settings: {Path(path).name}")
         except Exception as exc:
@@ -502,4 +512,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

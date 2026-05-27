@@ -29,10 +29,11 @@ uv run image-register
    - moving point 2
 6. Click `Preview / Estimate`.
 7. Adjust the alpha slider.
-8. Save the correction JSON.
-9. Load another modality image that shares the moving image coordinate system.
-10. Click `Apply Modality`.
-11. Export the overlay.
+8. Enable `Crop to common area` if you want the preview/export trimmed to the overlap.
+9. Save the correction JSON.
+10. Load another modality image that shares the moving image coordinate system.
+11. Click `Apply Modality`.
+12. Export the overlay.
 
 Affine needs at least 3 point pairs. Homography needs at least 4 point pairs.
 
@@ -41,4 +42,5 @@ Affine needs at least 3 point pairs. Homography needs at least 4 point pairs.
 - `Output pixels = fixed` keeps the output on the fixed image grid.
 - `Output pixels = moving` keeps the fixed image physical extent but samples it at the moving image pixel size.
 - The scale bar uses the selected output pixel size, so the fixed and moving pixel sizes must be entered in the same unit.
-- The saved JSON separates geometric registration settings from display settings such as alpha and scale bar length.
+- The common-area crop uses the rectangular bounding box where the fixed output and warped moving/modality image overlap.
+- The saved JSON separates geometric registration settings from display settings such as alpha, scale bar length, and crop mode.
