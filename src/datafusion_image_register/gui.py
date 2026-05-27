@@ -356,17 +356,14 @@ class RegistrationApp(tk.Tk):
 
         self.fixed_image: np.ndarray | None = None
         self.moving_image: np.ndarray | None = None
-        self.modality_image: np.ndarray | None = None
         self.fixed_path: str | None = None
         self.moving_path: str | None = None
-        self.modality_path: str | None = None
         self.fixed_points: list[tuple[float, float]] = []
         self.moving_points: list[tuple[float, float]] = []
         self.pending_fixed_point: tuple[float, float] | None = None
         self.current_settings: dict | None = None
         self.preview_overlay: np.ndarray | None = None
         self.preview_registered: np.ndarray | None = None
-        self.preview_source: str = "moving"
 
         self.transform_type_var = tk.StringVar(value="affine")
         self.output_basis_var = tk.StringVar(value="fixed")
@@ -444,8 +441,7 @@ class RegistrationApp(tk.Tk):
     def _build_controls(self, parent: ttk.Frame) -> None:
         ttk.Button(parent, text="Load Fixed", command=self._load_fixed).pack(fill="x", pady=(0, 4))
         ttk.Button(parent, text="Load Moving", command=self._load_moving).pack(fill="x", pady=(0, 4))
-        ttk.Button(parent, text="Load .ang (IPF-Z)", command=self._load_ang).pack(fill="x", pady=(0, 4))
-        ttk.Button(parent, text="Load Modality", command=self._load_modality).pack(fill="x", pady=(0, 12))
+        ttk.Button(parent, text="Load .ang (IPF-Z)", command=self._load_ang).pack(fill="x", pady=(0, 12))
 
         ttk.Label(parent, text="Transform").pack(anchor="w")
         ttk.Combobox(
@@ -494,7 +490,6 @@ class RegistrationApp(tk.Tk):
 
         ttk.Separator(parent).pack(fill="x", pady=12)
         ttk.Button(parent, text="Preview / Estimate", command=self._estimate_and_preview).pack(fill="x", pady=(0, 4))
-        ttk.Button(parent, text="Apply Modality", command=self._apply_modality).pack(fill="x", pady=(0, 4))
         ttk.Button(parent, text="Undo", command=self._undo).pack(fill="x", pady=(0, 4))
         ttk.Button(parent, text="Reset Points", command=self._reset_points).pack(fill="x", pady=(0, 12))
 
@@ -571,18 +566,6 @@ class RegistrationApp(tk.Tk):
 
         threading.Thread(target=_load, daemon=True).start()
 
-    def _load_modality(self) -> None:
-        path = self._ask_image_path()
-        if path is None:
-            return
-        self._set_status(f"Loading modality image: {Path(path).name}")
-        self.update_idletasks()
-        self.modality_image = self._read_image_or_alert(path)
-        if self.modality_image is None:
-            return
-        self.modality_path = str(path)
-        self._set_status(f"Loaded modality image: {Path(path).name}")
-
     def _read_image_or_alert(self, path: Path) -> np.ndarray | None:
         try:
             return read_image(path)
@@ -653,22 +636,9 @@ class RegistrationApp(tk.Tk):
             return
         try:
             self.current_settings = self._build_settings()
-            self.preview_source = "moving"
             self._render_preview(self.moving_image)
         except Exception as exc:
             messagebox.showerror("Registration Error", str(exc))
-
-    def _apply_modality(self) -> None:
-        if self.modality_image is None:
-            self._set_status("Load a modality image first.")
-            return
-        try:
-            if self.current_settings is None:
-                self.current_settings = self._build_settings()
-            self.preview_source = "modality"
-            self._render_preview(self.modality_image)
-        except Exception as exc:
-            messagebox.showerror("Modality Apply Error", str(exc))
 
     def _build_settings(self) -> dict:
         if self.fixed_image is None or self.moving_image is None:
@@ -723,12 +693,9 @@ class RegistrationApp(tk.Tk):
         )
 
     def _refresh_preview_if_ready(self) -> None:
-        if self.current_settings is None:
+        if self.current_settings is None or self.moving_image is None:
             return
-        if self.preview_source == "modality" and self.modality_image is not None:
-            self._render_preview(self.modality_image)
-        elif self.moving_image is not None:
-            self._render_preview(self.moving_image)
+        self._render_preview(self.moving_image)
 
     def _save_settings(self) -> None:
         try:
