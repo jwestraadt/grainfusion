@@ -120,3 +120,22 @@ def _coerce_image_array(array: np.ndarray) -> np.ndarray:
         raise ValueError(f"Unsupported image shape: {array.shape}")
 
     return np.ascontiguousarray(array)
+
+
+def load_ang_ipfz(path: str | Path) -> np.ndarray:
+    """Load an EDAX .ang file and return an IPF-Z colour map as (h, w, 3) uint8."""
+    from orix.io import load as _orix_load
+    from orix.plot import IPFColorKeyTSL
+    from orix.vector import Vector3d
+
+    xmap = _orix_load(str(path))
+    h, w = xmap.shape
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    for phase_id, phase in xmap.phases:
+        if phase_id == -1:
+            continue
+        mask = xmap.phase_id == phase_id
+        ckey = IPFColorKeyTSL(phase.point_group, direction=Vector3d.zvector())
+        colors = ckey.orientation2color(xmap[mask].orientations)
+        rgb.reshape(-1, 3)[mask] = (np.clip(colors, 0, 1) * 255).astype(np.uint8)
+    return rgb

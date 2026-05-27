@@ -9,7 +9,7 @@ from tkinter import filedialog, messagebox, ttk
 import numpy as np
 from PIL import Image, ImageTk
 
-from .io import SUPPORTED_EXTENSIONS, as_display_rgb, read_image, write_image
+from .io import SUPPORTED_EXTENSIONS, as_display_rgb, load_ang_ipfz, read_image, write_image
 from .overlay import make_overlay
 from .settings import load_settings, save_settings
 from .transforms import RegistrationError, build_registration_settings
@@ -444,6 +444,7 @@ class RegistrationApp(tk.Tk):
     def _build_controls(self, parent: ttk.Frame) -> None:
         ttk.Button(parent, text="Load Fixed", command=self._load_fixed).pack(fill="x", pady=(0, 4))
         ttk.Button(parent, text="Load Moving", command=self._load_moving).pack(fill="x", pady=(0, 4))
+        ttk.Button(parent, text="Load .ang (IPF-Z)", command=self._load_ang).pack(fill="x", pady=(0, 4))
         ttk.Button(parent, text="Load Modality", command=self._load_modality).pack(fill="x", pady=(0, 12))
 
         ttk.Label(parent, text="Transform").pack(anchor="w")
@@ -553,6 +554,22 @@ class RegistrationApp(tk.Tk):
     def _on_moving_load_error(self, exc: Exception) -> None:
         messagebox.showerror("Image Load Error", str(exc))
         self._set_status("Failed to load moving image.")
+
+    def _load_ang(self) -> None:
+        path = filedialog.askopenfilename(filetypes=[("EDAX ANG", "*.ang"), ("All files", "*.*")])
+        if not path:
+            return
+        path = Path(path)
+        self._set_status(f"Loading .ang IPF-Z: {path.name} …")
+
+        def _load() -> None:
+            try:
+                image = load_ang_ipfz(path)
+                self.after(0, lambda: self._on_moving_loaded(image, path))
+            except Exception as exc:
+                self.after(0, lambda: self._on_moving_load_error(exc))
+
+        threading.Thread(target=_load, daemon=True).start()
 
     def _load_modality(self) -> None:
         path = self._ask_image_path()

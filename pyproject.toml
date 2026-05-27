@@ -10,6 +10,7 @@ dependencies = [
     "opencv-python>=4.9",
     "pillow>=10.0",
     "tifffile>=2024.2.12",
+    "orix>=0.12",
 ]
 
 [project.scripts]
