@@ -7,6 +7,7 @@ from PIL import Image, ImageOps
 
 
 SUPPORTED_EXTENSIONS = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
+DISPLAY_MAX_SIDE = 2048
 
 
 def read_image(path: str | Path) -> np.ndarray:
@@ -64,6 +65,15 @@ def as_display_rgb(image: np.ndarray) -> np.ndarray:
     raise ValueError(f"Unsupported image shape for display: {array.shape}")
 
 
+def display_preview_rgb(image: np.ndarray, max_side: int = DISPLAY_MAX_SIDE) -> tuple[np.ndarray, int]:
+    """Return a downsampled RGB preview and its integer pixel step."""
+    array = np.asarray(image)
+    height, width = array.shape[:2]
+    step = max(1, int(np.ceil(max(height, width) / max(1, max_side))))
+    preview = array[::step, ::step] if step > 1 else array
+    return as_display_rgb(preview), step
+
+
 def normalize_to_uint8(image: np.ndarray) -> np.ndarray:
     """Scale an array to uint8 using its finite min/max range."""
     array = np.asarray(image)
@@ -73,13 +83,17 @@ def normalize_to_uint8(image: np.ndarray) -> np.ndarray:
     if array.dtype == np.bool_:
         return (array.astype(np.uint8) * 255)
 
-    finite = np.isfinite(array)
-    if not finite.any():
-        return np.zeros(array.shape, dtype=np.uint8)
+    if array.dtype.kind in {"i", "u"}:
+        min_value = array.min()
+        max_value = array.max()
+    else:
+        finite = np.isfinite(array)
+        if not finite.any():
+            return np.zeros(array.shape, dtype=np.uint8)
+        values = array[finite].astype(np.float64)
+        min_value = values.min()
+        max_value = values.max()
 
-    values = array[finite].astype(np.float64)
-    min_value = values.min()
-    max_value = values.max()
     if max_value <= min_value:
         return np.zeros(array.shape, dtype=np.uint8)
 
@@ -106,4 +120,3 @@ def _coerce_image_array(array: np.ndarray) -> np.ndarray:
         raise ValueError(f"Unsupported image shape: {array.shape}")
 
     return np.ascontiguousarray(array)
-

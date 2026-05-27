@@ -7,7 +7,7 @@ from tkinter import filedialog, messagebox, ttk
 import numpy as np
 from PIL import Image, ImageTk
 
-from .io import SUPPORTED_EXTENSIONS, as_display_rgb, read_image, write_image
+from .io import SUPPORTED_EXTENSIONS, display_preview_rgb, read_image, write_image
 from .overlay import make_overlay
 from .settings import load_settings, save_settings
 from .transforms import RegistrationError, build_registration_settings
@@ -29,7 +29,9 @@ class ImagePanel(ttk.Frame):
         self.click_callback = click_callback
         self.image: np.ndarray | None = None
         self.display_rgb: np.ndarray | None = None
+        self.preview_step = 1
         self.photo: ImageTk.PhotoImage | None = None
+        self.photo_key: tuple[int, int, int] | None = None
         self.points: list[tuple[float, float]] = []
         self.pending_point: tuple[float, float] | None = None
         self.scale = 1.0
@@ -46,17 +48,24 @@ class ImagePanel(ttk.Frame):
 
     def set_image(self, image: np.ndarray | None) -> None:
         self.image = image
-        self.display_rgb = as_display_rgb(image) if image is not None else None
+        self.display_rgb = None
+        self.preview_step = 1
+        self.photo = None
+        self.photo_key = None
+        if image is not None:
+            self.display_rgb, self.preview_step = display_preview_rgb(image)
         self.redraw()
 
     def set_points(
         self,
         points: list[tuple[float, float]] | None = None,
         pending_point: tuple[float, float] | None = None,
+        redraw: bool = True,
     ) -> None:
         self.points = list(points or [])
         self.pending_point = pending_point
-        self.redraw()
+        if redraw:
+            self.redraw()
 
     def redraw(self) -> None:
         self.canvas.delete("all")
@@ -78,9 +87,12 @@ class ImagePanel(ttk.Frame):
         self.offset_x = (canvas_width - self.display_width) // 2
         self.offset_y = (canvas_height - self.display_height) // 2
 
-        pil_image = Image.fromarray(self.display_rgb, mode="RGB")
-        pil_image = pil_image.resize((self.display_width, self.display_height), Image.Resampling.BILINEAR)
-        self.photo = ImageTk.PhotoImage(pil_image)
+        photo_key = (id(self.display_rgb), self.display_width, self.display_height)
+        if self.photo is None or self.photo_key != photo_key:
+            pil_image = Image.fromarray(self.display_rgb, mode="RGB")
+            pil_image = pil_image.resize((self.display_width, self.display_height), Image.Resampling.BILINEAR)
+            self.photo = ImageTk.PhotoImage(pil_image)
+            self.photo_key = photo_key
         self.canvas.create_image(self.offset_x, self.offset_y, image=self.photo, anchor="nw")
         self._draw_points()
 
@@ -91,8 +103,8 @@ class ImagePanel(ttk.Frame):
             self._draw_marker(self.pending_point, len(self.points) + 1, fill="#ffd166")
 
     def _draw_marker(self, point: tuple[float, float], index: int, fill: str) -> None:
-        x = self.offset_x + point[0] * self.scale
-        y = self.offset_y + point[1] * self.scale
+        x = self.offset_x + (point[0] / self.preview_step) * self.scale
+        y = self.offset_y + (point[1] / self.preview_step) * self.scale
         radius = 5
         self.canvas.create_oval(x - radius, y - radius, x + radius, y + radius, outline="black", width=2)
         self.canvas.create_oval(x - radius, y - radius, x + radius, y + radius, outline=fill, width=2)
@@ -113,8 +125,8 @@ class ImagePanel(ttk.Frame):
         if not (self.offset_y <= y <= self.offset_y + self.display_height):
             return None
 
-        image_x = (x - self.offset_x) / self.scale
-        image_y = (y - self.offset_y) / self.scale
+        image_x = ((x - self.offset_x) / self.scale) * self.preview_step
+        image_y = ((y - self.offset_y) / self.scale) * self.preview_step
         height, width = self.image.shape[:2]
         if not (0 <= image_x < width and 0 <= image_y < height):
             return None
@@ -148,6 +160,8 @@ class RegistrationApp(tk.Tk):
         self.alpha_var = tk.DoubleVar(value=0.5)
         self.scale_bar_length_var = tk.StringVar(value="10")
         self.scale_bar_units_var = tk.StringVar(value="um")
+        self.scale_bar_font_size_var = tk.StringVar(value="")
+        self.scale_bar_thickness_var = tk.StringVar(value="")
         self.crop_to_common_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Load fixed and moving images, then click fixed/moving point pairs.")
 
@@ -190,7 +204,7 @@ class RegistrationApp(tk.Tk):
         ttk.Combobox(
             parent,
             textvariable=self.transform_type_var,
-            values=("affine", "homography"),
+            values=("affine", "homography", "morphops_tps"),
             state="readonly",
         ).pack(fill="x", pady=(0, 8))
 
@@ -216,6 +230,8 @@ class RegistrationApp(tk.Tk):
 
         self._entry(parent, "Scale bar length", self.scale_bar_length_var)
         self._entry(parent, "Scale bar units", self.scale_bar_units_var)
+        self._entry(parent, "Scale bar font px", self.scale_bar_font_size_var)
+        self._entry(parent, "Scale bar height px", self.scale_bar_thickness_var)
         ttk.Checkbutton(
             parent,
             text="Crop to common area",
@@ -243,6 +259,8 @@ class RegistrationApp(tk.Tk):
         path = self._ask_image_path()
         if path is None:
             return
+        self._set_status(f"Loading fixed image: {Path(path).name}")
+        self.update_idletasks()
         self.fixed_image = self._read_image_or_alert(path)
         if self.fixed_image is None:
             return
@@ -257,12 +275,16 @@ class RegistrationApp(tk.Tk):
         path = self._ask_image_path()
         if path is None:
             return
+        self._set_status(f"Loading moving image: {Path(path).name}")
+        self.update_idletasks()
         self.moving_image = self._read_image_or_alert(path)
         if self.moving_image is None:
             return
         self.moving_path = str(path)
+        self._reset_points(redraw=False)
+        self.fixed_panel.set_points(self.fixed_points, self.pending_fixed_point)
+        self.moving_panel.set_points(self.moving_points, redraw=False)
         self.moving_panel.set_image(self.moving_image)
-        self._reset_points()
         self.current_settings = None
         self.preview_overlay = None
         self.overlay_panel.set_image(None)
@@ -272,6 +294,8 @@ class RegistrationApp(tk.Tk):
         path = self._ask_image_path()
         if path is None:
             return
+        self._set_status(f"Loading modality image: {Path(path).name}")
+        self.update_idletasks()
         self.modality_image = self._read_image_or_alert(path)
         if self.modality_image is None:
             return
@@ -311,9 +335,9 @@ class RegistrationApp(tk.Tk):
         self._update_point_panels()
         self._set_status(f"Added point pair {len(self.fixed_points)}.")
 
-    def _update_point_panels(self) -> None:
-        self.fixed_panel.set_points(self.fixed_points, self.pending_fixed_point)
-        self.moving_panel.set_points(self.moving_points)
+    def _update_point_panels(self, redraw: bool = True) -> None:
+        self.fixed_panel.set_points(self.fixed_points, self.pending_fixed_point, redraw=redraw)
+        self.moving_panel.set_points(self.moving_points, redraw=redraw)
 
     def _undo(self) -> None:
         if self.pending_fixed_point is not None:
@@ -325,12 +349,12 @@ class RegistrationApp(tk.Tk):
         self._update_point_panels()
         self._set_status(f"Point pairs: {len(self.fixed_points)}")
 
-    def _reset_points(self) -> None:
+    def _reset_points(self, redraw: bool = True) -> None:
         self.fixed_points.clear()
         self.moving_points.clear()
         self.pending_fixed_point = None
         self.current_settings = None
-        self._update_point_panels()
+        self._update_point_panels(redraw=redraw)
         self._set_status("Points reset.")
 
     def _estimate_and_preview(self) -> None:
@@ -378,6 +402,14 @@ class RegistrationApp(tk.Tk):
         alpha = float(self.alpha_var.get())
         scale_length = self._optional_positive_float(self.scale_bar_length_var.get(), "Scale bar length")
         units = self.scale_bar_units_var.get().strip() or "units"
+        scale_bar_font_size = self._optional_positive_int(
+            self.scale_bar_font_size_var.get(),
+            "Scale bar font px",
+        )
+        scale_bar_thickness = self._optional_positive_int(
+            self.scale_bar_thickness_var.get(),
+            "Scale bar height px",
+        )
         overlay, registered, _fixed_output = make_overlay(
             fixed_image=self.fixed_image,
             moving_or_modality_image=source_image,
@@ -386,6 +418,8 @@ class RegistrationApp(tk.Tk):
             scale_bar_length=scale_length,
             scale_bar_units=units,
             crop_to_common=bool(self.crop_to_common_var.get()),
+            scale_bar_font_size=scale_bar_font_size,
+            scale_bar_thickness=scale_bar_thickness,
         )
         self.preview_overlay = overlay
         self.preview_registered = registered
@@ -418,6 +452,14 @@ class RegistrationApp(tk.Tk):
                 ),
                 "scale_bar_units": self.scale_bar_units_var.get().strip() or "units",
                 "crop_to_common": bool(self.crop_to_common_var.get()),
+                "scale_bar_font_size": self._optional_positive_int(
+                    self.scale_bar_font_size_var.get(),
+                    "Scale bar font px",
+                ),
+                "scale_bar_thickness": self._optional_positive_int(
+                    self.scale_bar_thickness_var.get(),
+                    "Scale bar height px",
+                ),
             }
             path = filedialog.asksaveasfilename(
                 defaultextension=".json",
@@ -452,6 +494,8 @@ class RegistrationApp(tk.Tk):
                 self.scale_bar_length_var.set(str(display["scale_bar_length"]))
             if display.get("scale_bar_units"):
                 self.scale_bar_units_var.set(str(display["scale_bar_units"]))
+            self.scale_bar_font_size_var.set(self._display_optional_int(display.get("scale_bar_font_size")))
+            self.scale_bar_thickness_var.set(self._display_optional_int(display.get("scale_bar_thickness")))
             self.crop_to_common_var.set(bool(display.get("crop_to_common", False)))
             self._update_point_panels()
             self._set_status(f"Loaded settings: {Path(path).name}")
@@ -500,6 +544,22 @@ class RegistrationApp(tk.Tk):
         if not value.strip():
             return None
         return self._positive_float(value, label)
+
+    def _optional_positive_int(self, value: str, label: str) -> int | None:
+        if not value.strip():
+            return None
+        try:
+            parsed = int(value)
+        except ValueError as exc:
+            raise ValueError(f"{label} must be a whole number.") from exc
+        if parsed <= 0:
+            raise ValueError(f"{label} must be greater than zero.")
+        return parsed
+
+    def _display_optional_int(self, value: object) -> str:
+        if value is None or value == "":
+            return ""
+        return str(int(value))
 
     def _set_status(self, message: str) -> None:
         self.status_var.set(message)
