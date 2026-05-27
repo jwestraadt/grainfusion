@@ -32,11 +32,17 @@ def make_overlay(
         )
 
     fixed_rgb = as_display_rgb(fixed_output)
-    moving_rgb = as_display_rgb(moving_output)
-    mask_alpha = moving_mask[:, :, None].astype(np.float32) * alpha
+
+    if moving_output.ndim == 3 and moving_output.shape[2] == 4:
+        per_pixel_alpha = moving_output[:, :, 3:4].astype(np.float32) / 255.0
+        moving_rgb = moving_output[:, :, :3].astype(np.float32)
+        mask_alpha = moving_mask[:, :, None].astype(np.float32) * per_pixel_alpha * alpha
+    else:
+        moving_rgb = as_display_rgb(moving_output).astype(np.float32)
+        mask_alpha = moving_mask[:, :, None].astype(np.float32) * alpha
 
     overlay = fixed_rgb.astype(np.float32) * (1.0 - mask_alpha)
-    overlay += moving_rgb.astype(np.float32) * mask_alpha
+    overlay += moving_rgb * mask_alpha
     overlay = np.clip(overlay, 0, 255).astype(np.uint8)
 
     if scale_bar_length is not None and scale_bar_length > 0:

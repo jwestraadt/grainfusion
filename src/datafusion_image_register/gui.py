@@ -9,7 +9,15 @@ from tkinter import filedialog, messagebox, ttk
 import numpy as np
 from PIL import Image, ImageTk
 
-from .io import SUPPORTED_EXTENSIONS, as_display_rgb, load_ang_ipfz, read_image, write_image
+from .io import (
+    SUPPORTED_EXTENSIONS,
+    ang_available_visualizations,
+    ang_to_image,
+    as_display_rgb,
+    load_ang,
+    read_image,
+    write_image,
+)
 from .overlay import make_overlay
 from .settings import load_settings, save_settings
 from .transforms import RegistrationError, build_registration_settings
@@ -364,6 +372,9 @@ class RegistrationApp(tk.Tk):
         self.current_settings: dict | None = None
         self.preview_overlay: np.ndarray | None = None
         self.preview_registered: np.ndarray | None = None
+        self.xmap = None
+        self.ang_viz_var = tk.StringVar(value="IPF-Z")
+        self.ang_miso_var = tk.StringVar(value="5.0")
 
         self.transform_type_var = tk.StringVar(value="affine")
         self.output_basis_var = tk.StringVar(value="fixed")
@@ -441,7 +452,17 @@ class RegistrationApp(tk.Tk):
     def _build_controls(self, parent: ttk.Frame) -> None:
         ttk.Button(parent, text="Load Fixed", command=self._load_fixed).pack(fill="x", pady=(0, 4))
         ttk.Button(parent, text="Load Moving", command=self._load_moving).pack(fill="x", pady=(0, 4))
-        ttk.Button(parent, text="Load .ang (IPF-Z)", command=self._load_ang).pack(fill="x", pady=(0, 12))
+        ttk.Button(parent, text="Load .ang", command=self._load_ang).pack(fill="x", pady=(0, 4))
+
+        ttk.Label(parent, text=".ang visualization").pack(anchor="w", pady=(4, 0))
+        self._ang_viz_combo = ttk.Combobox(
+            parent, textvariable=self.ang_viz_var, values=["IPF-Z"],
+            state="readonly", width=16,
+        )
+        self._ang_viz_combo.pack(fill="x", pady=(0, 2))
+        self._entry(parent, "Min misorientation (°)", self.ang_miso_var)
+        ttk.Button(parent, text="Apply Visualization",
+                   command=self._apply_ang_viz).pack(fill="x", pady=(0, 12))
 
         ttk.Label(parent, text="Transform").pack(anchor="w")
         ttk.Combobox(
@@ -555,16 +576,52 @@ class RegistrationApp(tk.Tk):
         if not path:
             return
         path = Path(path)
-        self._set_status(f"Loading .ang IPF-Z: {path.name} …")
+        self._set_status(f"Loading .ang: {path.name} …")
 
         def _load() -> None:
             try:
-                image = load_ang_ipfz(path)
-                self.after(0, lambda: self._on_moving_loaded(image, path))
+                xmap = load_ang(path)
+                image = ang_to_image(xmap, "IPF-Z")
+                self.after(0, lambda: self._on_ang_loaded(xmap, image, path))
             except Exception as exc:
                 self.after(0, lambda: self._on_moving_load_error(exc))
 
         threading.Thread(target=_load, daemon=True).start()
+
+    def _on_ang_loaded(self, xmap, image: np.ndarray, path: Path) -> None:
+        self.xmap = xmap
+        self.ang_viz_var.set("IPF-Z")
+        self._ang_viz_combo.configure(values=ang_available_visualizations(xmap))
+        self._on_moving_loaded(image, path)
+
+    def _apply_ang_viz(self) -> None:
+        if self.xmap is None:
+            self._set_status("Load a .ang file first.")
+            return
+        viz = self.ang_viz_var.get()
+        try:
+            threshold = float(self.ang_miso_var.get())
+        except ValueError:
+            self._set_status("Min misorientation must be a number.")
+            return
+        self._set_status(f"Generating {viz} …")
+
+        def _compute() -> None:
+            try:
+                image = ang_to_image(self.xmap, viz, threshold)
+                self.after(0, lambda: self._update_moving_display(image))
+            except Exception as exc:
+                self.after(0, lambda: messagebox.showerror("Visualization Error", str(exc)))
+
+        threading.Thread(target=_compute, daemon=True).start()
+
+    def _update_moving_display(self, image: np.ndarray) -> None:
+        self.moving_image = image
+        self.moving_panel.set_image(image)
+        self.current_settings = None
+        self.preview_overlay = None
+        self.overlay_panel.set_image(None)
+        self._set_status("Visualization updated.")
 
     def _read_image_or_alert(self, path: Path) -> np.ndarray | None:
         try:

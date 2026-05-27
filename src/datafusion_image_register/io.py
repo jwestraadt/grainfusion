@@ -59,6 +59,12 @@ def as_display_rgb(image: np.ndarray) -> np.ndarray:
         gray = normalize_to_uint8(array[:, :, 0])
         return np.dstack([gray, gray, gray])
 
+    if array.ndim == 3 and array.shape[2] == 4:
+        # Composite RGBA over black: result = rgb * (alpha/255)
+        rgb = array[:, :, :3].astype(np.float32)
+        a = array[:, :, 3:4].astype(np.float32) / 255.0
+        return np.clip(rgb * a, 0, 255).astype(np.uint8)
+
     if array.ndim == 3 and array.shape[2] >= 3:
         return normalize_to_uint8(array[:, :, :3])
 
@@ -122,13 +128,34 @@ def _coerce_image_array(array: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(array)
 
 
-def load_ang_ipfz(path: str | Path) -> np.ndarray:
-    """Load an EDAX .ang file and return an IPF-Z colour map as (h, w, 3) uint8."""
+def load_ang(path: str | Path):
+    """Load an EDAX .ang file and return an orix CrystalMap."""
     from orix.io import load as _orix_load
+    return _orix_load(str(path))
+
+
+def ang_available_visualizations(xmap) -> list[str]:
+    """Return visualization choices available for this CrystalMap."""
+    viz = ["IPF-Z", "Grain Boundaries"]
+    for key in sorted(xmap.prop.keys()):
+        viz.append(key.upper())
+    return viz
+
+
+def ang_to_image(xmap, viz: str, threshold_deg: float = 5.0) -> np.ndarray:
+    """Render a CrystalMap to an (h, w, 3) uint8 RGB array."""
+    if viz == "IPF-Z":
+        return _ang_ipfz(xmap)
+    elif viz == "Grain Boundaries":
+        return _ang_grain_boundaries(xmap, threshold_deg)
+    else:
+        return _ang_scalar(xmap, viz.lower())
+
+
+def _ang_ipfz(xmap) -> np.ndarray:
     from orix.plot import IPFColorKeyTSL
     from orix.vector import Vector3d
 
-    xmap = _orix_load(str(path))
     h, w = xmap.shape
     rgb = np.zeros((h, w, 3), dtype=np.uint8)
     for phase_id, phase in xmap.phases:
@@ -139,3 +166,52 @@ def load_ang_ipfz(path: str | Path) -> np.ndarray:
         colors = ckey.orientation2color(xmap[mask].orientations)
         rgb.reshape(-1, 3)[mask] = (np.clip(colors, 0, 1) * 255).astype(np.uint8)
     return rgb
+
+
+def _ang_scalar(xmap, column: str) -> np.ndarray:
+    data = np.asarray(xmap.prop[column], dtype=np.float64).reshape(xmap.shape)
+    gray = normalize_to_uint8(data)
+    return np.dstack([gray, gray, gray])
+
+
+def _ang_grain_boundaries(xmap, threshold_deg: float) -> np.ndarray:
+    from orix.quaternion import Misorientation
+    from scipy.ndimage import gaussian_filter
+
+    h, w = xmap.shape
+    phase_ids = xmap.phase_id
+    indexed = phase_ids != -1
+
+    pg = next(p.point_group for pid, p in xmap.phases if pid != -1)
+    all_rots = xmap.rotations
+    thr = np.deg2rad(threshold_deg)
+    boundary = np.zeros(h * w, dtype=bool)
+
+    idx = np.arange(h * w)
+    neighbour_pairs = [
+        (idx[idx % w != w - 1], idx[idx % w != w - 1] + 1),
+        (idx[idx < w * (h - 1)], idx[idx < w * (h - 1)] + w),
+    ]
+
+    for pairs_i, pairs_j in neighbour_pairs:
+        both = indexed[pairs_i] & indexed[pairs_j]
+        pi, pj = pairs_i[both], pairs_j[both]
+        if len(pi) == 0:
+            continue
+        miso = Misorientation(~all_rots[pi] * all_rots[pj], symmetry=(pg, pg))
+        angles = miso.reduce().angle.data
+        is_gb = angles > thr
+        # Mark only pi (one pixel per edge) to keep boundaries 1 pixel wide
+        boundary[pi[is_gb]] = True
+
+    boundary &= indexed
+
+    # Gaussian anti-aliasing: smooth the hard pixel steps into sub-pixel transitions
+    alpha = gaussian_filter(boundary.reshape(h, w).astype(np.float32), sigma=0.7)
+    alpha = np.clip(alpha, 0.0, 1.0)
+
+    # RGBA: red boundaries on transparent background
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    rgba[:, :, 0] = 255
+    rgba[:, :, 3] = (alpha * 255).astype(np.uint8)
+    return rgba
