@@ -375,6 +375,7 @@ class RegistrationApp(tk.Tk):
         self.xmap = None
         self.ang_viz_var = tk.StringVar(value="IPF-Z")
         self.ang_miso_var = tk.StringVar(value="5.0")
+        self.ang_transparent_bg_var = tk.BooleanVar(value=True)
 
         self.transform_type_var = tk.StringVar(value="affine")
         self.output_basis_var = tk.StringVar(value="fixed")
@@ -461,8 +462,12 @@ class RegistrationApp(tk.Tk):
         )
         self._ang_viz_combo.pack(fill="x", pady=(0, 2))
         self._entry(parent, "Min misorientation (°)", self.ang_miso_var)
+        ttk.Checkbutton(
+            parent, text="Transparent background",
+            variable=self.ang_transparent_bg_var,
+        ).pack(anchor="w", pady=(4, 0))
         ttk.Button(parent, text="Apply Visualization",
-                   command=self._apply_ang_viz).pack(fill="x", pady=(0, 12))
+                   command=self._apply_ang_viz).pack(fill="x", pady=(4, 12))
 
         ttk.Label(parent, text="Transform").pack(anchor="w")
         ttk.Combobox(
@@ -604,11 +609,12 @@ class RegistrationApp(tk.Tk):
         except ValueError:
             self._set_status("Min misorientation must be a number.")
             return
+        transparent = bool(self.ang_transparent_bg_var.get())
         self._set_status(f"Generating {viz} …")
 
         def _compute() -> None:
             try:
-                image = ang_to_image(self.xmap, viz, threshold)
+                image = ang_to_image(self.xmap, viz, threshold, transparent)
                 self.after(0, lambda: self._update_moving_display(image))
             except Exception as exc:
                 self.after(0, lambda: messagebox.showerror("Visualization Error", str(exc)))

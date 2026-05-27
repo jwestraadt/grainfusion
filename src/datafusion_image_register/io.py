@@ -142,12 +142,12 @@ def ang_available_visualizations(xmap) -> list[str]:
     return viz
 
 
-def ang_to_image(xmap, viz: str, threshold_deg: float = 5.0) -> np.ndarray:
-    """Render a CrystalMap to an (h, w, 3) uint8 RGB array."""
+def ang_to_image(xmap, viz: str, threshold_deg: float = 5.0, transparent_bg: bool = True) -> np.ndarray:
+    """Render a CrystalMap to a uint8 array (RGBA for transparent grain boundaries, RGB otherwise)."""
     if viz == "IPF-Z":
         return _ang_ipfz(xmap)
     elif viz == "Grain Boundaries":
-        return _ang_grain_boundaries(xmap, threshold_deg)
+        return _ang_grain_boundaries(xmap, threshold_deg, transparent_bg)
     else:
         return _ang_scalar(xmap, viz.lower())
 
@@ -174,7 +174,7 @@ def _ang_scalar(xmap, column: str) -> np.ndarray:
     return np.dstack([gray, gray, gray])
 
 
-def _ang_grain_boundaries(xmap, threshold_deg: float) -> np.ndarray:
+def _ang_grain_boundaries(xmap, threshold_deg: float, transparent_bg: bool = True) -> np.ndarray:
     from orix.quaternion import Misorientation
     from scipy.ndimage import gaussian_filter
 
@@ -210,8 +210,15 @@ def _ang_grain_boundaries(xmap, threshold_deg: float) -> np.ndarray:
     alpha = gaussian_filter(boundary.reshape(h, w).astype(np.float32), sigma=0.7)
     alpha = np.clip(alpha, 0.0, 1.0)
 
-    # RGBA: red boundaries on transparent background
-    rgba = np.zeros((h, w, 4), dtype=np.uint8)
-    rgba[:, :, 0] = 255
-    rgba[:, :, 3] = (alpha * 255).astype(np.uint8)
-    return rgba
+    if transparent_bg:
+        # RGBA: red boundaries on transparent background
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[:, :, 0] = 255
+        rgba[:, :, 3] = (alpha * 255).astype(np.uint8)
+        return rgba
+    else:
+        # RGB: red boundaries on white background
+        a = alpha[:, :, None]
+        white = np.array([255, 255, 255], dtype=np.float32)
+        red = np.array([255, 0, 0], dtype=np.float32)
+        return (white * (1.0 - a) + red * a).astype(np.uint8)
