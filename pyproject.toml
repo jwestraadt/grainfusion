@@ -37,6 +37,9 @@ Homepage = "https://github.com/jwestraadt/grainfusion"
 [project.scripts]
 grainfusion = "datafusion_image_register.gui:main"
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/datafusion_image_register"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
