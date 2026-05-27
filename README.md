@@ -1,10 +1,14 @@
-# DataFusion Image Register
+# GrainFusion
 
-Small Python GUI for registering two images with corresponding clicked points.
+Multimodal microscopy image registration GUI with EBSD orientation map support.
 
 ## Install
 
-Install `uv` first if it is not already available on your PATH.
+```bash
+pip install grainfusion
+```
+
+Or, for development with `uv`:
 
 ```powershell
 uv sync
@@ -12,8 +16,14 @@ uv sync
 
 ## Run
 
+```bash
+grainfusion
+```
+
+Or via uv in development:
+
 ```powershell
-uv run image-register
+uv run grainfusion
 ```
 
 ## Basic Workflow

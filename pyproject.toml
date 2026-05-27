@@ -1,9 +1,26 @@
 [project]
-name = "datafusion-image-register"
+name = "grainfusion"
 version = "0.1.0"
-description = "Point-based image registration GUI for affine, homography, and TPS correction."
+description = "Multimodal microscopy image registration GUI with EBSD orientation map support."
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Johan Westraadt", email = "johan.westraadt@gmail.com" },
+]
+keywords = ["EBSD", "image registration", "microscopy", "materials science", "grain boundaries", "IPF"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
 dependencies = [
     "morphops>=0.1.13",
     "numpy>=1.26",
@@ -13,8 +30,12 @@ dependencies = [
     "orix>=0.12",
 ]
 
+[project.urls]
+Homepage = "https://github.com/westraadt/grainfusion"
+"Bug Tracker" = "https://github.com/westraadt/grainfusion/issues"
+
 [project.scripts]
-image-register = "datafusion_image_register.gui:main"
+grainfusion = "datafusion_image_register.gui:main"
 
 [build-system]
 requires = ["hatchling"]
